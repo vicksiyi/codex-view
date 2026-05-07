@@ -11,6 +11,22 @@ Codex CLI 会话可视化面板。
 - 会话列表：支持按 `session id`、`cwd`、`originator`、工具调用、错误状态筛选
 - 时间线详情：查看用户消息、助手消息、工具调用、工具输出和 Token 计数
 
+## 页面截图
+
+以下截图基于本机 `~/.codex/sessions` 的真实数据生成。
+
+### 总览页
+
+![codex-view dashboard](docs/screenshots/dashboard.png)
+
+### 会话列表页
+
+![codex-view sessions list](docs/screenshots/sessions.png)
+
+### 会话详情页
+
+![codex-view session timeline](docs/screenshots/timeline.png)
+
 ## 本地运行
 
 ```bash
