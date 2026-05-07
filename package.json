@@ -1,10 +1,30 @@
 {
   "name": "codex-view",
   "version": "0.1.0",
-  "private": true,
   "description": "Codex CLI 会话可视化面板",
   "license": "MIT",
   "type": "module",
+  "bin": {
+    "codex-view": "bin/codex-view.js"
+  },
+  "files": [
+    "bin",
+    ".next",
+    "public",
+    "next.config.ts",
+    "README.md",
+    "LICENSE",
+    "!.next/cache",
+    "!.next/standalone",
+    "!.next/trace",
+    "!.next/types"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20.9.0"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/vicksiyi/codex-view.git"
@@ -13,9 +33,19 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "build:package": "pnpm run build && node scripts/prepare-package.mjs",
+    "prepack": "pnpm run build:package",
+    "pack:check": "npm pack --dry-run",
     "start": "next start",
     "lint": "tsc --noEmit"
   },
+  "keywords": [
+    "codex",
+    "nextjs",
+    "sqlite",
+    "visualization",
+    "cli"
+  ],
   "dependencies": {
     "echarts": "^5.6.0",
     "echarts-for-react": "^3.0.2",

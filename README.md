@@ -23,3 +23,21 @@ pnpm dev
 ## 缓存目录
 
 默认缓存目录为 `~/.codex-view/cache`，也可以通过 `CODEX_VIEW_CACHE_DIR` 覆盖。
+
+## 全局安装
+
+```bash
+npm install -g codex-view
+codex-view
+```
+
+默认会从 `3000` 端口开始找可用端口并启动服务，然后自动打开浏览器。
+需要 `Node.js >= 20.9.0`。
+
+可选参数：
+
+```bash
+codex-view --port 3200 --host 127.0.0.1
+codex-view --sessions-dir ~/.codex/sessions --cache-dir ~/.codex-view/cache
+codex-view --no-open
+```
