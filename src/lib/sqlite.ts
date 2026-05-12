@@ -1,9 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import Database from "better-sqlite3";
 import { getCacheDir } from "@/lib/paths";
 
-export type SqliteDb = DatabaseSync;
+export type SqliteDb = Database.Database;
 
 let db: SqliteDb | null = null;
 
@@ -12,7 +12,7 @@ function openDb() {
   fs.mkdirSync(cacheDir, { recursive: true });
 
   const dbPath = path.join(cacheDir, "index.sqlite");
-  const instance = new DatabaseSync(dbPath);
+  const instance = new Database(dbPath);
   instance.exec("PRAGMA journal_mode = WAL;");
   instance.exec("PRAGMA synchronous = NORMAL;");
   instance.exec("PRAGMA temp_store = MEMORY;");
