@@ -81,6 +81,8 @@ export type TimelineEvent = {
   kind: "user" | "assistant" | "tool_call" | "tool_output" | "error" | "other" | "token_count";
   name?: string;
   text?: string;
+  callId?: string;
+  phase?: string;
   tokenUsage?: TokenUsageInfo;
 };
 

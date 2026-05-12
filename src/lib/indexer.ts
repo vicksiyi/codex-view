@@ -849,7 +849,14 @@ async function buildTimeline(file: string, summary: SessionSummary): Promise<Ses
         const role = payload.role;
         const text = extractMessageText(payload) ?? "";
         if (role === "user") events.push({ ts, kind: "user", text });
-        else if (role === "assistant") events.push({ ts, kind: "assistant", text });
+        else if (role === "assistant") {
+          events.push({
+            ts,
+            kind: "assistant",
+            text,
+            phase: typeof payload.phase === "string" ? payload.phase : undefined
+          });
+        }
         else events.push({ ts, kind: "other", text });
       } else if (payloadType === "function_call" || payloadType === "custom_tool_call") {
         const name = typeof payload.name === "string" ? payload.name : "unknown";
@@ -859,13 +866,13 @@ async function buildTimeline(file: string, summary: SessionSummary): Promise<Ses
           (typeof payload.arguments === "string" && payload.arguments) ||
           (typeof payload.input === "string" && payload.input) ||
           "";
-        events.push({ ts, kind: "tool_call", name, text });
+        events.push({ ts, kind: "tool_call", name, text, callId: callId ?? undefined });
       } else if (payloadType === "function_call_output" || payloadType === "custom_tool_call_output") {
         const callId = typeof payload.call_id === "string" ? payload.call_id : null;
         const name =
           typeof payload.name === "string" ? payload.name : callId ? callIdToTool.get(callId) : undefined;
         const text = typeof payload.output === "string" ? payload.output : "";
-        events.push({ ts, kind: "tool_output", name, text });
+        events.push({ ts, kind: "tool_output", name, text, callId: callId ?? undefined });
       }
     }
 

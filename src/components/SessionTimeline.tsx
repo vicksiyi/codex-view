@@ -8,16 +8,37 @@ import { fetchJson } from "@/lib/fetcher";
 import { formatDateTime, formatInt } from "@/lib/format";
 import type { SessionTimelineResponse, TokenUsage, TokenUsageInfo } from "@/lib/types";
 
-function kindLabel(kind: string) {
+type DisplayEvent = SessionTimelineResponse["events"][number] & {
+  tokenUsageMeta?: TokenUsageInfo;
+};
+
+type ToolPair = {
+  key: string;
+  name: string;
+  callId?: string;
+  call?: DisplayEvent;
+  output?: DisplayEvent;
+};
+
+type DisplayBlock =
+  | {
+      kind: "user" | "error" | "other";
+      event: DisplayEvent;
+    }
+  | {
+      kind: "assistant_group";
+      assistant: DisplayEvent | null;
+      tools: ToolPair[];
+    };
+
+function kindLabel(kind: DisplayBlock["kind"] | "assistant" | "tool") {
   switch (kind) {
     case "user":
       return "用户";
     case "assistant":
       return "助手";
-    case "tool_call":
-      return "工具调用";
-    case "tool_output":
-      return "工具输出";
+    case "tool":
+      return "工具";
     case "error":
       return "错误";
     default:
@@ -25,7 +46,7 @@ function kindLabel(kind: string) {
   }
 }
 
-function bubbleClass(kind: string) {
+function bubbleClass(kind: "user" | "assistant" | "tool_call" | "tool_output" | "error" | "other") {
   switch (kind) {
     case "user":
       return "border-blue-200 bg-blue-50";
@@ -58,7 +79,7 @@ function formatTokenUsage(prefix: string, usage: TokenUsage | null | undefined) 
 }
 
 function attachTokenCounters(events: SessionTimelineResponse["events"]) {
-  const output: (SessionTimelineResponse["events"][number] & { tokenUsageMeta?: TokenUsageInfo })[] = [];
+  const output: DisplayEvent[] = [];
   let lastIndex = -1;
 
   for (const event of events) {
@@ -75,6 +96,129 @@ function attachTokenCounters(events: SessionTimelineResponse["events"]) {
   return output;
 }
 
+function buildDisplayBlocks(events: DisplayEvent[]) {
+  const blocks: DisplayBlock[] = [];
+  const toolByCallId = new Map<string, ToolPair>();
+  let currentAssistantGroup: Extract<DisplayBlock, { kind: "assistant_group" }> | null = null;
+  let orphanToolIndex = 0;
+
+  function createAssistantGroup(assistant: DisplayEvent | null) {
+    const group: Extract<DisplayBlock, { kind: "assistant_group" }> = {
+      kind: "assistant_group",
+      assistant,
+      tools: []
+    };
+    blocks.push(group);
+    currentAssistantGroup = group;
+    return group;
+  }
+
+  function ensureAssistantGroup() {
+    return currentAssistantGroup ?? createAssistantGroup(null);
+  }
+
+  for (const event of events) {
+    if (event.kind === "user" || event.kind === "error" || event.kind === "other") {
+      blocks.push({ kind: event.kind, event });
+      currentAssistantGroup = null;
+      continue;
+    }
+
+    if (event.kind === "assistant") {
+      createAssistantGroup(event);
+      continue;
+    }
+
+    if (event.kind === "tool_call") {
+      const group = ensureAssistantGroup();
+      const pair: ToolPair = {
+        key: event.callId ?? `tool-call-${orphanToolIndex++}`,
+        name: event.name ?? "unknown",
+        callId: event.callId,
+        call: event
+      };
+      group.tools.push(pair);
+      if (event.callId) toolByCallId.set(event.callId, pair);
+      continue;
+    }
+
+    if (event.kind === "tool_output") {
+      const existing = event.callId ? toolByCallId.get(event.callId) : undefined;
+      if (existing) {
+        existing.output = event;
+        if (!existing.name && event.name) existing.name = event.name;
+        continue;
+      }
+
+      const group = ensureAssistantGroup();
+      const pair: ToolPair = {
+        key: event.callId ?? `tool-output-${orphanToolIndex++}`,
+        name: event.name ?? "unknown",
+        callId: event.callId,
+        output: event
+      };
+      group.tools.push(pair);
+      if (event.callId) toolByCallId.set(event.callId, pair);
+    }
+  }
+
+  return blocks;
+}
+
+function EventText({
+  kind,
+  text,
+  emptyLabel
+}: {
+  kind: "user" | "assistant" | "tool_call" | "tool_output" | "error" | "other";
+  text: string;
+  emptyLabel: string;
+}) {
+  if (!text) {
+    return (
+      <div className="rounded-lg border border-dashed border-[color:var(--line)] p-3 text-sm text-[var(--muted)]">
+        {emptyLabel}
+      </div>
+    );
+  }
+
+  const preview = previewText(text);
+  const isLong = preview !== text;
+
+  if (isLong) {
+    return (
+      <details>
+        <summary className={`cursor-pointer rounded-lg border p-3 text-sm text-[var(--ink)] ${bubbleClass(kind)}`}>
+          <pre className="whitespace-pre-wrap break-words font-sans">{preview}</pre>
+        </summary>
+        <div className={`mt-2 rounded-lg border p-3 text-sm text-[var(--ink)] ${bubbleClass(kind)}`}>
+          <pre className="whitespace-pre-wrap break-words font-sans">{text}</pre>
+        </div>
+      </details>
+    );
+  }
+
+  return (
+    <div className={`rounded-lg border p-3 text-sm text-[var(--ink)] ${bubbleClass(kind)}`}>
+      <pre className="whitespace-pre-wrap break-words font-sans">{text}</pre>
+    </div>
+  );
+}
+
+function TokenUsageMeta({ usage }: { usage?: TokenUsageInfo }) {
+  const deltaLabel = formatTokenUsage("增量", usage?.delta);
+  const totalLabel = formatTokenUsage("累计", usage?.total);
+
+  if (!deltaLabel && !totalLabel) return null;
+
+  return (
+    <div className="mt-3 space-y-1 text-xs text-[var(--muted)]">
+      {deltaLabel ? <div>{deltaLabel}</div> : null}
+      {totalLabel ? <div>{totalLabel}</div> : null}
+    </div>
+  );
+}
+
 export default function SessionTimeline({ sessionId }: { sessionId: string }) {
   const { data, error, isLoading } = useSWR<SessionTimelineResponse>(
     `/api/session/${encodeURIComponent(sessionId)}`,
@@ -83,46 +227,55 @@ export default function SessionTimeline({ sessionId }: { sessionId: string }) {
   const [filters, setFilters] = useState({
     user: true,
     assistant: true,
-    tool_call: true,
-    tool_output: true,
+    tool: true,
     error: true,
     other: false
   });
 
-  const displayItems = useMemo(() => attachTokenCounters(data?.events ?? []), [data?.events]);
+  const displayEvents = useMemo(() => attachTokenCounters(data?.events ?? []), [data?.events]);
+  const displayBlocks = useMemo(() => buildDisplayBlocks(displayEvents), [displayEvents]);
+
   const counts = useMemo(() => {
     const stats = {
       user: 0,
       assistant: 0,
-      tool_call: 0,
-      tool_output: 0,
+      tool: 0,
       error: 0,
       other: 0
     };
-    for (const item of displayItems) {
-      stats[item.kind as keyof typeof stats] += 1;
-    }
-    return stats;
-  }, [displayItems]);
 
-  const filteredItems = useMemo(() => {
-    return displayItems.filter((item) => filters[item.kind as keyof typeof filters]);
-  }, [displayItems, filters]);
+    for (const block of displayBlocks) {
+      if (block.kind === "assistant_group") {
+        stats.assistant += block.assistant ? 1 : 0;
+        stats.tool += block.tools.length;
+        continue;
+      }
+
+      stats[block.kind] += 1;
+    }
+
+    return stats;
+  }, [displayBlocks]);
+
+  const filteredBlocks = useMemo(() => {
+    return displayBlocks.filter((block) => {
+      if (block.kind === "user") return filters.user;
+      if (block.kind === "error") return filters.error;
+      if (block.kind === "other") return filters.other;
+      if (block.kind !== "assistant_group") return false;
+
+      const hasAssistant = Boolean(block.assistant) && filters.assistant;
+      const hasTools = filters.tool && block.tools.length > 0;
+      return hasAssistant || hasTools;
+    });
+  }, [displayBlocks, filters]);
 
   if (error) {
-    return (
-      <section className="surface p-4 text-sm text-red-700">
-        时间线加载失败：{String(error)}
-      </section>
-    );
+    return <section className="surface p-4 text-sm text-red-700">时间线加载失败：{String(error)}</section>;
   }
 
   if (isLoading || !data) {
-    return (
-      <section className="surface p-4 text-sm text-[var(--muted)]">
-        正在加载时间线...
-      </section>
-    );
+    return <section className="surface p-4 text-sm text-[var(--muted)]">正在加载时间线...</section>;
   }
 
   const summary = data.summary;
@@ -182,10 +335,9 @@ export default function SessionTimeline({ sessionId }: { sessionId: string }) {
             [
               { key: "user", label: "用户", icon: MessageSquare },
               { key: "assistant", label: "助手", icon: Bot },
-              { key: "tool_call", label: "工具调用", icon: Hammer },
-              { key: "tool_output", label: "工具输出", icon: TerminalSquare },
+              { key: "tool", label: "工具", icon: Hammer },
               { key: "error", label: "错误", icon: CircleAlert },
-              { key: "other", label: "其他", icon: MessageSquare }
+              { key: "other", label: "其他", icon: TerminalSquare }
             ] as const
           ).map((filter) => {
             const Icon = filter.icon;
@@ -212,54 +364,115 @@ export default function SessionTimeline({ sessionId }: { sessionId: string }) {
 
         {data.truncated ? (
           <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
-            事件过多，当前只渲染前 {formatInt(displayItems.length)} 条。
+            事件过多，当前只渲染前 {formatInt(displayEvents.length)} 条。
           </div>
         ) : null}
 
         <div className="mt-4 space-y-4">
-          {filteredItems.map((item, index) => {
-            const text = item.text ?? "";
-            const preview = previewText(text);
-            const isLong = preview !== text;
-            const deltaLabel = formatTokenUsage("增量", item.tokenUsageMeta?.delta);
-            const totalLabel = formatTokenUsage("累计", item.tokenUsageMeta?.total);
+          {filteredBlocks.map((block, index) => {
+            if (block.kind === "user" || block.kind === "error" || block.kind === "other") {
+              const event = block.event;
+
+              return (
+                <div key={`${block.kind}-${event.ts}-${index}`} className="rounded-lg border border-[color:var(--line)] bg-white/70 p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="inline-flex items-center gap-2 rounded-md border border-[color:var(--line)] bg-[var(--panel)] px-2.5 py-1 text-xs font-medium text-[var(--ink)]">
+                      <span
+                        className={`h-2 w-2 rounded-full ${
+                          block.kind === "error" ? "bg-red-500" : block.kind === "user" ? "bg-blue-500" : "bg-slate-400"
+                        }`}
+                      />
+                      <span>{kindLabel(block.kind)}</span>
+                    </div>
+                    <div className="mono text-xs text-[var(--muted)]">{formatDateTime(event.ts)}</div>
+                  </div>
+
+                  <div className="mt-3">
+                    <EventText
+                      kind={block.kind}
+                      text={event.text ?? ""}
+                      emptyLabel={block.kind === "error" ? "无错误详情。" : "无文本内容。"}
+                    />
+                  </div>
+
+                  <TokenUsageMeta usage={event.tokenUsageMeta} />
+                </div>
+              );
+            }
+
+            const assistantBlock = block as Extract<DisplayBlock, { kind: "assistant_group" }>;
+            const assistantVisible = Boolean(assistantBlock.assistant) && filters.assistant;
+            const tools = filters.tool ? assistantBlock.tools : [];
+            const groupTs =
+              assistantBlock.assistant?.ts ??
+              tools[0]?.call?.ts ??
+              tools[0]?.output?.ts ??
+              summary.startedAt ??
+              new Date().toISOString();
 
             return (
-              <div key={`${item.ts}-${index}`} className="rounded-lg border border-[color:var(--line)] bg-white/70 p-4">
+              <div key={`assistant-group-${groupTs}-${index}`} className="rounded-lg border border-[color:var(--line)] bg-white/70 p-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div className="inline-flex items-center gap-2 rounded-md border border-[color:var(--line)] bg-[var(--panel)] px-2.5 py-1 text-xs font-medium text-[var(--ink)]">
-                    <span className={`h-2 w-2 rounded-full ${item.kind === "error" ? "bg-red-500" : item.kind === "assistant" ? "bg-teal-500" : item.kind === "user" ? "bg-blue-500" : item.kind === "tool_call" ? "bg-amber-500" : "bg-slate-400"}`} />
-                    <span>{kindLabel(item.kind)}</span>
-                    {item.name ? <span className="text-[var(--muted)]">/ {item.name}</span> : null}
+                    <span className={`h-2 w-2 rounded-full ${assistantVisible ? "bg-teal-500" : "bg-amber-500"}`} />
+                    <span>{assistantVisible ? kindLabel("assistant") : "工具链"}</span>
+                    {assistantVisible && assistantBlock.assistant?.phase ? (
+                      <span className="text-[var(--muted)]">/ {assistantBlock.assistant.phase}</span>
+                    ) : null}
                   </div>
-                  <div className="mono text-xs text-[var(--muted)]">{formatDateTime(item.ts)}</div>
+                  <div className="mono text-xs text-[var(--muted)]">{formatDateTime(groupTs)}</div>
                 </div>
 
-                {text ? (
-                  isLong ? (
-                    <details className="mt-3">
-                      <summary className={`cursor-pointer rounded-lg border p-3 text-sm text-[var(--ink)] ${bubbleClass(item.kind)}`}>
-                        <pre className="whitespace-pre-wrap break-words font-sans">{preview}</pre>
-                      </summary>
-                      <div className={`mt-2 rounded-lg border p-3 text-sm text-[var(--ink)] ${bubbleClass(item.kind)}`}>
-                        <pre className="whitespace-pre-wrap break-words font-sans">{text}</pre>
-                      </div>
-                    </details>
-                  ) : (
-                    <div className={`mt-3 rounded-lg border p-3 text-sm text-[var(--ink)] ${bubbleClass(item.kind)}`}>
-                      <pre className="whitespace-pre-wrap break-words font-sans">{text}</pre>
-                    </div>
-                  )
-                ) : (
-                  <div className="mt-3 rounded-lg border border-dashed border-[color:var(--line)] p-3 text-sm text-[var(--muted)]">
-                    无文本内容。
+                {assistantVisible && assistantBlock.assistant ? (
+                  <div className="mt-3">
+                    <EventText
+                      kind="assistant"
+                      text={assistantBlock.assistant.text ?? ""}
+                      emptyLabel="无文本内容。"
+                    />
+                    <TokenUsageMeta usage={assistantBlock.assistant.tokenUsageMeta} />
                   </div>
-                )}
+                ) : null}
 
-                {deltaLabel || totalLabel ? (
-                  <div className="mt-3 space-y-1 text-xs text-[var(--muted)]">
-                    {deltaLabel ? <div>{deltaLabel}</div> : null}
-                    {totalLabel ? <div>{totalLabel}</div> : null}
+                {tools.length ? (
+                  <div className="mt-4 space-y-3">
+                    {tools.map((tool: ToolPair, toolIndex: number) => {
+                      const callTs = tool.call?.ts ?? "—";
+                      const outputTs = tool.output?.ts ?? null;
+
+                      return (
+                        <div
+                          key={`${tool.key}-${toolIndex}`}
+                          className="rounded-lg border border-[color:var(--line)] bg-[var(--panel)] p-4"
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-3">
+                            <div className="inline-flex items-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-900">
+                              <Hammer className="h-4 w-4" />
+                              <span>{tool.name}</span>
+                              {tool.callId ? <span className="mono text-[10px] text-amber-700">{tool.callId}</span> : null}
+                            </div>
+                            <div className="flex flex-wrap items-center gap-3 text-xs text-[var(--muted)]">
+                              <span className="mono">调用 {formatDateTime(callTs)}</span>
+                              <span className="mono">输出 {formatDateTime(outputTs)}</span>
+                            </div>
+                          </div>
+
+                          <div className="mt-3 grid gap-3 xl:grid-cols-2">
+                            <div className="space-y-2">
+                              <div className="text-xs font-medium text-[var(--muted)]">调用</div>
+                              <EventText kind="tool_call" text={tool.call?.text ?? ""} emptyLabel="无调用参数。" />
+                              <TokenUsageMeta usage={tool.call?.tokenUsageMeta} />
+                            </div>
+
+                            <div className="space-y-2">
+                              <div className="text-xs font-medium text-[var(--muted)]">输出</div>
+                              <EventText kind="tool_output" text={tool.output?.text ?? ""} emptyLabel="尚未记录工具输出。" />
+                              <TokenUsageMeta usage={tool.output?.tokenUsageMeta} />
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 ) : null}
               </div>
