@@ -1,9 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import useSWR from "swr";
-import { ArrowLeft, Bot, CircleAlert, Hammer, MessageSquare, TerminalSquare } from "lucide-react";
+import { ArrowLeft, Bot, ChevronDown, ChevronRight, CircleAlert, Hammer, MessageSquare, TerminalSquare } from "lucide-react";
 import { fetchJson } from "@/lib/fetcher";
 import { formatDateTime, formatInt } from "@/lib/format";
 import type { SessionTimelineResponse, TokenUsage, TokenUsageInfo } from "@/lib/types";
@@ -27,9 +27,58 @@ type DisplayBlock =
     }
   | {
       kind: "assistant_group";
+      key: string;
       assistant: DisplayEvent | null;
       tools: ToolPair[];
     };
+
+type FilterKey = "user" | "assistant" | "tool" | "error" | "other";
+
+const ROLE_FILTERS = [
+  { key: "user", label: "用户", icon: MessageSquare },
+  { key: "assistant", label: "助手", icon: Bot },
+  { key: "tool", label: "工具", icon: Hammer },
+  { key: "error", label: "错误", icon: CircleAlert },
+  { key: "other", label: "其他", icon: TerminalSquare }
+] as const;
+
+function filterButtonClass(key: FilterKey, active: boolean) {
+  if (!active) {
+    return "border-[color:var(--line)] bg-white text-[var(--muted)] hover:border-[color:var(--line-strong)] hover:bg-[var(--panel)] hover:text-[var(--ink)]";
+  }
+
+  switch (key) {
+    case "user":
+      return "border-blue-300 bg-blue-100 text-blue-950 shadow-sm ring-1 ring-blue-200";
+    case "assistant":
+      return "border-teal-300 bg-teal-100 text-teal-950 shadow-sm ring-1 ring-teal-200";
+    case "tool":
+      return "border-amber-300 bg-amber-100 text-amber-950 shadow-sm ring-1 ring-amber-200";
+    case "error":
+      return "border-red-300 bg-red-100 text-red-950 shadow-sm ring-1 ring-red-200";
+    default:
+      return "border-slate-300 bg-slate-100 text-slate-900 shadow-sm ring-1 ring-slate-200";
+  }
+}
+
+function filterBadgeClass(key: FilterKey, active: boolean) {
+  if (!active) {
+    return "border-[color:var(--line)] bg-[var(--panel)] text-[var(--muted)]";
+  }
+
+  switch (key) {
+    case "user":
+      return "border-blue-300 bg-white/80 text-blue-900";
+    case "assistant":
+      return "border-teal-300 bg-white/80 text-teal-900";
+    case "tool":
+      return "border-amber-300 bg-white/80 text-amber-900";
+    case "error":
+      return "border-red-300 bg-white/80 text-red-900";
+    default:
+      return "border-slate-300 bg-white/80 text-slate-900";
+  }
+}
 
 function kindLabel(kind: DisplayBlock["kind"] | "assistant" | "tool") {
   switch (kind) {
@@ -100,11 +149,17 @@ function buildDisplayBlocks(events: DisplayEvent[]) {
   const blocks: DisplayBlock[] = [];
   const toolByCallId = new Map<string, ToolPair>();
   let currentAssistantGroup: Extract<DisplayBlock, { kind: "assistant_group" }> | null = null;
+  let groupIndex = 0;
   let orphanToolIndex = 0;
 
-  function createAssistantGroup(assistant: DisplayEvent | null) {
+  function nextGroupKey(prefix: string, ts?: string) {
+    return `${prefix}-${ts ?? "unknown"}-${groupIndex++}`;
+  }
+
+  function createAssistantGroup(assistant: DisplayEvent | null, key = nextGroupKey(assistant ? "assistant" : "tools", assistant?.ts)) {
     const group: Extract<DisplayBlock, { kind: "assistant_group" }> = {
       kind: "assistant_group",
+      key,
       assistant,
       tools: []
     };
@@ -113,8 +168,8 @@ function buildDisplayBlocks(events: DisplayEvent[]) {
     return group;
   }
 
-  function ensureAssistantGroup() {
-    return currentAssistantGroup ?? createAssistantGroup(null);
+  function ensureAssistantGroup(seedTs?: string) {
+    return currentAssistantGroup ?? createAssistantGroup(null, nextGroupKey("tools", seedTs));
   }
 
   for (const event of events) {
@@ -125,12 +180,12 @@ function buildDisplayBlocks(events: DisplayEvent[]) {
     }
 
     if (event.kind === "assistant") {
-      createAssistantGroup(event);
+      createAssistantGroup(event, nextGroupKey("assistant", event.ts));
       continue;
     }
 
     if (event.kind === "tool_call") {
-      const group = ensureAssistantGroup();
+      const group = ensureAssistantGroup(event.ts);
       const pair: ToolPair = {
         key: event.callId ?? `tool-call-${orphanToolIndex++}`,
         name: event.name ?? "unknown",
@@ -150,7 +205,7 @@ function buildDisplayBlocks(events: DisplayEvent[]) {
         continue;
       }
 
-      const group = ensureAssistantGroup();
+      const group = ensureAssistantGroup(event.ts);
       const pair: ToolPair = {
         key: event.callId ?? `tool-output-${orphanToolIndex++}`,
         name: event.name ?? "unknown",
@@ -231,9 +286,21 @@ export default function SessionTimeline({ sessionId }: { sessionId: string }) {
     error: true,
     other: false
   });
+  const [toolsCollapsedByDefault, setToolsCollapsedByDefault] = useState(false);
+  const [toolCollapseOverrides, setToolCollapseOverrides] = useState<Record<string, boolean>>({});
 
   const displayEvents = useMemo(() => attachTokenCounters(data?.events ?? []), [data?.events]);
   const displayBlocks = useMemo(() => buildDisplayBlocks(displayEvents), [displayEvents]);
+  const assistantGroups = useMemo(
+    () => displayBlocks.filter((block): block is Extract<DisplayBlock, { kind: "assistant_group" }> => block.kind === "assistant_group"),
+    [displayBlocks]
+  );
+  const toolGroupCount = useMemo(() => assistantGroups.filter((block) => block.tools.length > 0).length, [assistantGroups]);
+
+  useEffect(() => {
+    setToolsCollapsedByDefault(false);
+    setToolCollapseOverrides({});
+  }, [sessionId]);
 
   const counts = useMemo(() => {
     const stats = {
@@ -269,6 +336,31 @@ export default function SessionTimeline({ sessionId }: { sessionId: string }) {
       return hasAssistant || hasTools;
     });
   }, [displayBlocks, filters]);
+
+  function isGroupCollapsed(groupKey: string) {
+    return toolCollapseOverrides[groupKey] ?? toolsCollapsedByDefault;
+  }
+
+  function setAllToolGroupsCollapsed(collapsed: boolean) {
+    setToolsCollapsedByDefault(collapsed);
+    setToolCollapseOverrides({});
+  }
+
+  function toggleGroupCollapsed(groupKey: string) {
+    setToolCollapseOverrides((current) => {
+      const collapsed = current[groupKey] ?? toolsCollapsedByDefault;
+      const next = !collapsed;
+      const updated = { ...current };
+
+      if (next === toolsCollapsedByDefault) {
+        delete updated[groupKey];
+      } else {
+        updated[groupKey] = next;
+      }
+
+      return updated;
+    });
+  }
 
   if (error) {
     return <section className="surface p-4 text-sm text-red-700">时间线加载失败：{String(error)}</section>;
@@ -330,16 +422,9 @@ export default function SessionTimeline({ sessionId }: { sessionId: string }) {
       </section>
 
       <section className="surface p-4">
-        <div className="flex flex-wrap items-center gap-2">
-          {(
-            [
-              { key: "user", label: "用户", icon: MessageSquare },
-              { key: "assistant", label: "助手", icon: Bot },
-              { key: "tool", label: "工具", icon: Hammer },
-              { key: "error", label: "错误", icon: CircleAlert },
-              { key: "other", label: "其他", icon: TerminalSquare }
-            ] as const
-          ).map((filter) => {
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-2 rounded-lg border border-[color:var(--line)] bg-[var(--panel)] p-1">
+            {ROLE_FILTERS.map((filter) => {
             const Icon = filter.icon;
             const active = filters[filter.key];
             return (
@@ -347,19 +432,39 @@ export default function SessionTimeline({ sessionId }: { sessionId: string }) {
                 key={filter.key}
                 type="button"
                 onClick={() => setFilters((current) => ({ ...current, [filter.key]: !current[filter.key] }))}
-                className={`inline-flex h-9 items-center gap-2 rounded-md border px-3 text-sm transition-colors ${
-                  active
-                    ? "border-[color:var(--line-strong)] bg-[var(--panel-strong)] text-[var(--ink)]"
-                    : "border-[color:var(--line)] text-[var(--muted)] hover:border-[color:var(--line-strong)] hover:bg-[var(--panel)]"
-                }`}
+                className={`inline-flex h-10 items-center gap-2 rounded-md border px-3 text-sm font-medium transition-colors ${filterButtonClass(filter.key, active)}`}
               >
                 <Icon className="h-4 w-4" />
-                <span>
-                  {filter.label} {counts[filter.key]}
+                <span>{filter.label}</span>
+                <span
+                  className={`mono inline-flex min-w-8 items-center justify-center rounded-full border px-2 py-0.5 text-[11px] ${filterBadgeClass(filter.key, active)}`}
+                >
+                  {formatInt(counts[filter.key])}
                 </span>
               </button>
             );
           })}
+        </div>
+          {toolGroupCount > 0 ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setAllToolGroupsCollapsed(false)}
+                className="inline-flex h-10 items-center gap-2 rounded-md border border-[color:var(--line)] bg-white px-3 text-sm text-[var(--muted)] transition-colors hover:border-[color:var(--line-strong)] hover:bg-[var(--panel)] hover:text-[var(--ink)]"
+              >
+                <ChevronDown className="h-4 w-4" />
+                <span>展开全部工具</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setAllToolGroupsCollapsed(true)}
+                className="inline-flex h-10 items-center gap-2 rounded-md border border-[color:var(--line)] bg-white px-3 text-sm text-[var(--muted)] transition-colors hover:border-[color:var(--line-strong)] hover:bg-[var(--panel)] hover:text-[var(--ink)]"
+              >
+                <ChevronRight className="h-4 w-4" />
+                <span>折叠全部工具</span>
+              </button>
+            </div>
+          ) : null}
         </div>
 
         {data.truncated ? (
@@ -403,6 +508,7 @@ export default function SessionTimeline({ sessionId }: { sessionId: string }) {
             const assistantBlock = block as Extract<DisplayBlock, { kind: "assistant_group" }>;
             const assistantVisible = Boolean(assistantBlock.assistant) && filters.assistant;
             const tools = filters.tool ? assistantBlock.tools : [];
+            const toolsCollapsed = isGroupCollapsed(assistantBlock.key);
             const groupTs =
               assistantBlock.assistant?.ts ??
               tools[0]?.call?.ts ??
@@ -411,13 +517,25 @@ export default function SessionTimeline({ sessionId }: { sessionId: string }) {
               new Date().toISOString();
 
             return (
-              <div key={`assistant-group-${groupTs}-${index}`} className="rounded-lg border border-[color:var(--line)] bg-white/70 p-4">
+              <div key={assistantBlock.key} className="rounded-lg border border-[color:var(--line)] bg-white/70 p-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div className="inline-flex items-center gap-2 rounded-md border border-[color:var(--line)] bg-[var(--panel)] px-2.5 py-1 text-xs font-medium text-[var(--ink)]">
-                    <span className={`h-2 w-2 rounded-full ${assistantVisible ? "bg-teal-500" : "bg-amber-500"}`} />
-                    <span>{assistantVisible ? kindLabel("assistant") : "工具链"}</span>
-                    {assistantVisible && assistantBlock.assistant?.phase ? (
-                      <span className="text-[var(--muted)]">/ {assistantBlock.assistant.phase}</span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="inline-flex items-center gap-2 rounded-md border border-[color:var(--line)] bg-[var(--panel)] px-2.5 py-1 text-xs font-medium text-[var(--ink)]">
+                      <span className={`h-2 w-2 rounded-full ${assistantVisible ? "bg-teal-500" : "bg-amber-500"}`} />
+                      <span>{assistantVisible ? kindLabel("assistant") : "工具链"}</span>
+                      {assistantVisible && assistantBlock.assistant?.phase ? (
+                        <span className="text-[var(--muted)]">/ {assistantBlock.assistant.phase}</span>
+                      ) : null}
+                    </div>
+                    {tools.length ? (
+                      <button
+                        type="button"
+                        onClick={() => toggleGroupCollapsed(assistantBlock.key)}
+                        className="inline-flex h-8 items-center gap-2 rounded-md border border-[color:var(--line)] bg-white px-3 text-xs font-medium text-[var(--muted)] transition-colors hover:border-[color:var(--line-strong)] hover:bg-[var(--panel)] hover:text-[var(--ink)]"
+                      >
+                        {toolsCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                        <span>{toolsCollapsed ? `展开工具 ${formatInt(tools.length)}` : `折叠工具 ${formatInt(tools.length)}`}</span>
+                      </button>
                     ) : null}
                   </div>
                   <div className="mono text-xs text-[var(--muted)]">{formatDateTime(groupTs)}</div>
@@ -434,7 +552,7 @@ export default function SessionTimeline({ sessionId }: { sessionId: string }) {
                   </div>
                 ) : null}
 
-                {tools.length ? (
+                {tools.length && !toolsCollapsed ? (
                   <div className="mt-4 space-y-3">
                     {tools.map((tool: ToolPair, toolIndex: number) => {
                       const callTs = tool.call?.ts ?? "—";
@@ -473,6 +591,12 @@ export default function SessionTimeline({ sessionId }: { sessionId: string }) {
                         </div>
                       );
                     })}
+                  </div>
+                ) : null}
+
+                {tools.length && toolsCollapsed ? (
+                  <div className="mt-4 rounded-lg border border-dashed border-[color:var(--line)] bg-[var(--panel)] px-3 py-2 text-sm text-[var(--muted)]">
+                    已折叠 {formatInt(tools.length)} 个工具调用
                   </div>
                 ) : null}
               </div>

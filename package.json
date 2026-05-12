@@ -1,6 +1,6 @@
 {
   "name": "codex-view",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Codex CLI 会话可视化面板",
   "license": "MIT",
   "type": "module",
